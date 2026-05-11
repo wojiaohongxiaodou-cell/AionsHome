@@ -456,7 +456,7 @@ function feedStreamingChunk(text) {
   scrollToBottom();
 }
 
-function endStreamingBubble() {
+function endStreamingBubble(attachments) {
   // 流结束后，按双换行拆分成多个气泡，并解析 [[image:...]]
   if (streamingBubble && streamingText) {
     const parts = streamingText.split(/\n{2,}/).filter(p => p.trim());
@@ -471,9 +471,15 @@ function endStreamingBubble() {
         container.appendChild(b);
       });
       parent.replaceChild(container, streamingBubble);
+      // 附件图片追加到多气泡容器后面
+      const attHtml = renderAttachments(attachments);
+      if (attHtml) container.insertAdjacentHTML('afterend', attHtml);
     } else {
       // 单气泡也解析 [[image:...]]
       streamingBubble.innerHTML = escWithImages(streamingText);
+      // 附件图片追加到气泡后面
+      const attHtml = renderAttachments(attachments);
+      if (attHtml) streamingBubble.insertAdjacentHTML('afterend', attHtml);
     }
   }
   streamingBubble = null;
@@ -565,7 +571,7 @@ function handleSSE(data) {
       if (data.message && data.message.content != null && streamingBubble) {
         streamingText = data.message.content;
       }
-      endStreamingBubble();
+      endStreamingBubble(data.message && data.message.attachments);
       playRecv();
       break;
     case 'connor_start':
@@ -591,7 +597,7 @@ function handleSSE(data) {
       if (data.message && data.message.content != null && streamingBubble) {
         streamingText = data.message.content;
       }
-      endStreamingBubble();
+      endStreamingBubble(data.message && data.message.attachments);
       // 如果 connor_done 带了 message 且没有流式气泡（兼容旧路径），追加消息
       if (data.message
           && !document.getElementById(`streaming-${data.message.id}`)

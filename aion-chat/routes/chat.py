@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List, Any
 
-from config import DEFAULT_MODEL, load_worldbook, SETTINGS, UPLOADS_DIR, CODEX_UPLOADS_DIR, PUBLIC_DIR
+from config import DEFAULT_MODEL, load_worldbook, SETTINGS, UPLOADS_DIR, CODEX_UPLOADS_DIR, PUBLIC_DIR, MODELS
 from database import get_db
 from ws import manager
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
@@ -634,6 +634,11 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
     abilities.append(f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你记住某件事的时候，可以用该指令录入记忆库。禁止滥用。")
     ability_block = "[系统能力] 你可以在回复中根据对话氛围，善用以下指令：\n" + "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))
     ability_block += "\n\n<meta>标签内为消息元数据，不是对话内容的一部分，你的回复中不要包含任何<meta>标签或时间信息。"
+    # CLI 模型专属：告知图片存储目录，使其能保存图片并返回路径
+    _provider = MODELS.get(model_key, {}).get("provider", "")
+    if _provider in ("gemini_cli", "codex_cli"):
+        _uploads_path = str(UPLOADS_DIR.resolve()).replace(chr(92), "/")
+        ability_block += f"\n\n【文件存储】当需要下载或保存图片/文件时，请保存到此目录：{_uploads_path}/ ，保存后在回复中给出完整路径即可，系统会自动识别并展示图片。"
     schedules = await get_active_schedules()
     schedule_text = build_schedule_prompt(schedules)
     ability_block += f"\n\n【当前日程列表】\n{schedule_text}"
@@ -1058,6 +1063,11 @@ async def send_message(conv_id: str, body: MsgCreate):
     abilities.append(f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你记住某件事的时候，可以用该指令录入记忆库。禁止滥用。")
     ability_block = "[系统能力] 你可以在回复中根据对话氛围，善用以下指令：\n" + "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))
     ability_block += "\n\n<meta>标签内为消息元数据，不是对话内容的一部分，你的回复中不要包含任何<meta>标签或时间信息。"
+    # CLI 模型专属：告知图片存储目录
+    _provider = MODELS.get(model_key, {}).get("provider", "")
+    if _provider in ("gemini_cli", "codex_cli"):
+        _uploads_path = str(UPLOADS_DIR.resolve()).replace(chr(92), "/")
+        ability_block += f"\n\n【文件存储】当需要下载或保存图片/文件时，请保存到此目录：{_uploads_path}/ ，保存后在回复中给出完整路径即可，系统会自动识别并展示图片。"
     # 注入当前日程列表
     schedules = await get_active_schedules()
     schedule_text = build_schedule_prompt(schedules)
@@ -1989,6 +1999,11 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
     abilities.append(f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你记住某件事的时候，可以用该指令录入记忆库。禁止滥用。")
     ability_block = "[系统能力] 你可以在回复中根据对话氛围，善用以下指令：\n" + "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))
     ability_block += "\n\n<meta>标签内为消息元数据，不是对话内容的一部分，你的回复中不要包含任何<meta>标签或时间信息。"
+    # CLI 模型专属：告知图片存储目录
+    _provider = MODELS.get(model_key, {}).get("provider", "")
+    if _provider in ("gemini_cli", "codex_cli"):
+        _uploads_path = str(UPLOADS_DIR.resolve()).replace(chr(92), "/")
+        ability_block += f"\n\n【文件存储】当需要下载或保存图片/文件时，请保存到此目录：{_uploads_path}/ ，保存后在回复中给出完整路径即可，系统会自动识别并展示图片。"
     schedules = await get_active_schedules()
     schedule_text = build_schedule_prompt(schedules)
     ability_block += f"\n\n【当前日程列表】\n{schedule_text}"

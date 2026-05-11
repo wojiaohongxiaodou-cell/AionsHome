@@ -105,7 +105,20 @@ async function init() {
 }
 
 function escHtml(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
-function formatMsg(s) { return escHtml(s).replace(/\n/g, '<br>'); }
+function formatMsg(s) {
+  // 先转义 HTML，再将 [[image:path]] 标记渲染为 <img>
+  const escaped = escHtml(s);
+  const imgRe = /\[\[image:(\S+?)\]\]/g;
+  let result = '', lastIdx = 0, match;
+  while ((match = imgRe.exec(escaped)) !== null) {
+    result += escaped.slice(lastIdx, match.index).replace(/\n/g, '<br>');
+    const safeUrl = match[1];
+    result += `<img class="cr-inline-img" src="${safeUrl}" onclick="openImageViewer && openImageViewer(this.src)" loading="lazy" style="max-width:100%;border-radius:8px;cursor:pointer;margin:4px 0">`;
+    lastIdx = imgRe.lastIndex;
+  }
+  result += escaped.slice(lastIdx).replace(/\n/g, '<br>');
+  return result;
+}
 
 // ── 配置弹窗 ──
 function toggleConfig(e) {

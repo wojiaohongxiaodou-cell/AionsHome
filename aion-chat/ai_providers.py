@@ -531,6 +531,22 @@ async def _spawn_cli_process(cmd: list[str], prompt: str, env: dict | None = Non
     await proc.stdin.wait_closed()
     return proc
 
+# Gemini CLI tool_name → 中文状态标签映射
+_CLI_TOOL_LABELS = {
+    "google_web_search": "🔍 联网搜索",
+    "web_search":        "🔍 联网搜索",
+    "web_fetch":         "🌐 抓取网页",
+    "read_file":         "📄 读取文件",
+    "read_many_files":   "📄 批量读取文件",
+    "write_file":        "📝 写入文件",
+    "edit_file":         "✏️ 编辑文件",
+    "list_directory":    "📂 列出目录",
+    "grep":              "🔎 搜索文本",
+    "glob":              "🔎 搜索文件",
+    "run_shell_command": "⚙️ 执行命令",
+    "shell":             "⚙️ 执行命令",
+}
+
 async def call_gemini_cli(messages: list, model: str, meta: dict | None = None,
                           temperature: float | None = None, max_tokens: int | None = None):
     """通过 gemini CLI 子进程流式获取响应（stream-json 模式，支持 token 统计）"""
@@ -550,15 +566,18 @@ async def call_gemini_cli(messages: list, model: str, meta: dict | None = None,
     if model:
         cmd.extend(["-m", model])
     # --skip-trust 跳过目录信任检查；-p " " 触发非交互模式，实际 prompt 通过 stdin 传入
-    # 注意：不能加 -o stream-json！该模式会把 agent 内部 tool_use/thought/<image_description>/Footnote
-    # 等事件全部当作 message 流出来，造成"思考链泄漏"。默认文本模式下只输出最终回复正文。
-    cmd.extend(["--skip-trust", "-p", " "])
+    # -o stream-json 启用 JSONL 流模式，每行一个 JSON 事件：
+    #   init / message(user) / tool_use / tool_result / message(assistant,delta) / result(stats)
+    # 好处：结构化解析只提取 assistant 正文，tool_use/tool_result 转为状态事件，
+    # 不再需要 GeminiCliNoiseFilter 噪音过滤；result 事件自带 token 统计。
+    # --approval-mode auto_edit 允许 CLI 自动执行文件读写操作（如下载图片存盘），
+    # 否则非交互模式下 write_file 等工具默认被拒绝。
+    cmd.extend(["--skip-trust", "--approval-mode", "yolo", "-o", "stream-json", "-p", " "])
 
     try:
         proc = await _spawn_cli_process(cmd, prompt)
 
-        # 调试：把原始 prompt 和原始 stdout 写日志，便于排查思考链泄漏问题。
-        # 通过环境变量 GEMINI_CLI_DEBUG=1 启用。
+        # 调试日志
         debug_log = None
         if os.environ.get("GEMINI_CLI_DEBUG") == "1":
             from datetime import datetime
@@ -569,27 +588,80 @@ async def call_gemini_cli(messages: list, model: str, meta: dict | None = None,
             with open(debug_log, "w", encoding="utf-8") as f:
                 f.write("=== PROMPT ===\n")
                 f.write(prompt)
-                f.write("\n\n=== RAW STDOUT (chunks 用 ||| 分隔) ===\n")
+                f.write("\n\n=== RAW JSONL ===\n")
 
-        # 默认文本模式 + 跨 chunk 状态机过滤器：
-        # Gemini 3 在复杂 prompt + 图片下偶尔会把 <image_description>/<thought>/Footnote{...}
-        # 当作回复格式输出。这些标签会横跨多个流式 chunk，必须用状态机识别"块开始→块结束"
-        # 整段丢弃，不能简单 regex（regex 只能处理已收到的完整文本）。
-        noise_filter = GeminiCliNoiseFilter()
+        # stream-json 模式：逐行读取 JSONL，按 type 分发
+        line_buf = ""
         async for chunk in proc.stdout:
             text = chunk.decode("utf-8", errors="replace")
             if not text:
                 continue
             if debug_log:
                 with open(debug_log, "a", encoding="utf-8") as f:
-                    f.write(text + "|||")
-            cleaned = noise_filter.feed(text)
-            if cleaned:
-                yield cleaned
-        # 流结束，flush 剩余 pending
-        tail = noise_filter.flush()
-        if tail:
-            yield tail
+                    f.write(text)
+            line_buf += text
+            while "\n" in line_buf:
+                line, line_buf = line_buf.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                etype = event.get("type", "")
+
+                if etype == "message":
+                    # 只提取 assistant 的增量文本 (delta=true)
+                    if event.get("role") == "assistant" and event.get("delta"):
+                        content = event.get("content", "")
+                        if content:
+                            yield content
+
+                elif etype == "tool_use":
+                    tool_name = event.get("tool_name", "")
+                    params = event.get("parameters", {})
+                    label = _CLI_TOOL_LABELS.get(tool_name, f"🔧 {tool_name}")
+                    # 构造简洁的状态描述
+                    detail = ""
+                    if "query" in params:
+                        detail = f"：{params['query'][:60]}"
+                    elif "command" in params:
+                        cmd_str = params["command"]
+                        detail = f"：{cmd_str[:60]}{'…' if len(cmd_str) > 60 else ''}"
+                    elif "path" in params:
+                        detail = f"：{params['path']}"
+                    elif "pattern" in params:
+                        detail = f"：{params['pattern']}"
+                    yield f"{CLI_STATUS_PREFIX}{label}{detail}…"
+
+                elif etype == "tool_result":
+                    status = event.get("status", "")
+                    tool_id = event.get("tool_id", "")
+                    # tool_id 格式如 "google_web_search_1234_0"，提取 tool_name
+                    parts = tool_id.rsplit("_", 2)
+                    tname = "_".join(parts[:-2]) if len(parts) >= 3 else tool_id
+                    label = _CLI_TOOL_LABELS.get(tname, f"🔧 {tname}")
+                    if status == "success":
+                        yield f"{CLI_STATUS_PREFIX}✅ {label} 完成"
+                    else:
+                        yield f"{CLI_STATUS_PREFIX}❌ {label} 失败"
+
+                elif etype == "result":
+                    # 提取 token 统计
+                    stats = event.get("stats", {})
+                    if meta is not None and stats:
+                        meta["prompt_tokens"] = stats.get("input_tokens", 0)
+                        meta["completion_tokens"] = stats.get("output_tokens", 0)
+                        meta["total_tokens"] = stats.get("total_tokens", 0)
+                        meta["raw"] = stats
+
+                elif etype == "error":
+                    err_msg = event.get("message", "") or event.get("error", "")
+                    if err_msg:
+                        yield f"\n[GeminiCLI错误] {err_msg[:500]}"
+
         if debug_log:
             with open(debug_log, "a", encoding="utf-8") as f:
                 f.write("\n\n=== END ===\n")
